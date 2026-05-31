@@ -3,6 +3,12 @@
 //  libghostty-spm
 //
 
+#if canImport(Glibc)
+import Glibc
+#else
+import Darwin
+#endif
+
 import Foundation
 import GhosttyKit
 
@@ -74,7 +80,7 @@ extension TerminalController {
         platformSetup: (inout ghostty_surface_config_s) -> Void
     ) -> ghostty_surface_t? {
         guard let workingDirectory else {
-            return buildSurface(
+            return finalizeCommand(
                 app: app,
                 bridge: bridge,
                 configuration: configuration,
@@ -85,6 +91,80 @@ extension TerminalController {
 
         return workingDirectory.withCString { ptr in
             config.working_directory = ptr
+            return finalizeCommand(
+                app: app,
+                bridge: bridge,
+                configuration: configuration,
+                config: &config,
+                platformSetup: platformSetup
+            )
+        }
+    }
+
+    private func finalizeCommand(
+        app: ghostty_app_t,
+        bridge: TerminalCallbackBridge,
+        configuration: TerminalSurfaceOptions,
+        config: inout ghostty_surface_config_s,
+        platformSetup: (inout ghostty_surface_config_s) -> Void
+    ) -> ghostty_surface_t? {
+        guard let command = configuration.command else {
+            return finalizeEnvironment(
+                app: app,
+                bridge: bridge,
+                configuration: configuration,
+                config: &config,
+                platformSetup: platformSetup
+            )
+        }
+
+        return command.withCString { ptr in
+            config.command = ptr
+            return finalizeEnvironment(
+                app: app,
+                bridge: bridge,
+                configuration: configuration,
+                config: &config,
+                platformSetup: platformSetup
+            )
+        }
+    }
+
+    private func finalizeEnvironment(
+        app: ghostty_app_t,
+        bridge: TerminalCallbackBridge,
+        configuration: TerminalSurfaceOptions,
+        config: inout ghostty_surface_config_s,
+        platformSetup: (inout ghostty_surface_config_s) -> Void
+    ) -> ghostty_surface_t? {
+        let environment = configuration.environment
+        guard !environment.isEmpty else {
+            return buildSurface(
+                app: app,
+                bridge: bridge,
+                configuration: configuration,
+                config: &config,
+                platformSetup: platformSetup
+            )
+        }
+
+        // strdup each key/value so the C strings outlive ghostty_surface_new,
+        // then free them once the surface has been built.
+        var allocations: [UnsafeMutablePointer<CChar>] = []
+        defer { allocations.forEach { free($0) } }
+
+        var envVars: [ghostty_env_var_s] = []
+        envVars.reserveCapacity(environment.count)
+        for (key, value) in environment {
+            guard let keyPtr = strdup(key), let valuePtr = strdup(value) else { continue }
+            allocations.append(keyPtr)
+            allocations.append(valuePtr)
+            envVars.append(ghostty_env_var_s(key: keyPtr, value: valuePtr))
+        }
+
+        return envVars.withUnsafeMutableBufferPointer { buffer in
+            config.env_vars = buffer.baseAddress
+            config.env_var_count = buffer.count
             return buildSurface(
                 app: app,
                 bridge: bridge,
